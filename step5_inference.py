@@ -7,6 +7,7 @@ Logika:
     Person di kasir_area + shirt sangat jelas + 1 sinyal pendukung → KASIR ✅
     Person di kasir_area + tidak memenuhi syarat kasir  → pengunjung ⚠️
     Person di luar kasir_area                           → pengunjung
+
 """
 
 import argparse
@@ -46,7 +47,7 @@ POSE_MODEL_DIR  = Path(__file__).resolve().parent / "models"
 POSE_MODEL_PATH = POSE_MODEL_DIR / "pose_landmarker_lite.task"
 POSE_MODEL_URL  = (
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-    "pose_landmarker_lite/float16/1/pose_landmarker_lite.task"  # model machine learning dari Google MediaPipe yang digunakan untuk mendeteksi 33 titik kerangka (landmark) tubuh manusia pada gambar atau video
+    "pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
 )
 POSE_MIN_DET_CONF      = 0.3
 POSE_MIN_PRESENCE_CONF = 0.3
@@ -67,6 +68,7 @@ COLOR = {
 # Warna topi crew HokBen (coklat tua)
 # [P8] Rentang "navy" dihapus — terbukti overlap dengan kemeja/baju
 # gelap polos customer (false positive). Warna topi HokBen yang
+# sebenarnya dipakai adalah coklat tua saja.
 HAT_COLORS_HSV = [
     (5,  22,  35, 180,  18, 115),   # coklat tua (topi HokBen)
 ]
@@ -714,7 +716,6 @@ def run_inference(
     show       : bool  = False,
     use_pose   : bool  = True,
     debug_pose : bool  = False,
-    stream_url : str | None = None,
 ) -> Path:
     try:
         from ultralytics import YOLO
@@ -722,13 +723,13 @@ def run_inference(
         raise ImportError("pip install ultralytics")
 
     weights    = Path(weights)
-    video_path = Path(video_path) if video_path else Path("stream")
+    video_path = Path(video_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not weights.exists():
         raise FileNotFoundError(f"Weights tidak ada: {weights}")
-    if not stream_url and not video_path.exists():
+    if not video_path.exists():
         raise FileNotFoundError(f"Video tidak ada: {video_path}")
 
     model = YOLO(str(weights))
@@ -742,14 +743,7 @@ def run_inference(
     else:
         log.info("Pose estimator: DIMATIKAN (--no-pose), pakai mode fallback persentase-bbox")
 
-    if stream_url:
-        log.info("Mode: RTSP Stream → %s", stream_url)
-        cap = cv2.VideoCapture(stream_url)
-    
-    else:
-        log.info("Mode: File Video → %s", video_path)
-        cap = cv2.VideoCapture(str(video_path))
-    
+    cap      = cv2.VideoCapture(str(video_path))
     fps      = cap.get(cv2.CAP_PROP_FPS) or 30
     width    = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -772,15 +766,9 @@ def run_inference(
 
     while True:
         ret, frame = cap.read()
-        if not ret or frame is None:
-            if stream_url:
-                log.warning("Frame kosong, stream terputus... retry")
-                continue
-            else:
-                break
+        if not ret:
+            break
         frame_idx += 1
-
-        frame = preprocess_frame(frame)
 
         results = model(
             frame,
@@ -789,7 +777,7 @@ def run_inference(
             device=0,
             verbose=False
         )[0]
-
+        
         detections = _parse_results(results)
         annotated, stats = analyze_frame(
             frame, detections,
@@ -823,25 +811,6 @@ def run_inference(
     log.info("[DONE] Output → %s", out_path)
     return out_path
 
-#----------------------------------------------------
-#----------------------------------------------------
-# BUAT CERAHIN GAMBAR SECARA STREAM (DI atas def _parse_result)
-#----------------------------------------------------
-#----------------------------------------------------
-
-def preprocess_frame(frame: np.ndarray) -> np.ndarray:
-    # Step 1: Unsharp masking lebih agresif
-    gaussian = cv2.GaussianBlur(frame, (0, 0), 3.0)   # naikkan dari 2.0 → 3.0
-    unsharp  = cv2.addWeighted(frame, 2.0, gaussian, -1.0, 0)  # naikkan dari 1.5/-0.5
-
-    # Step 2: CLAHE lebih kuat
-    lab      = cv2.cvtColor(unsharp, cv2.COLOR_BGR2LAB)
-    l, a, b  = cv2.split(lab)
-    clahe    = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))  # naikkan dari 2.0 → 3.0
-    l        = clahe.apply(l)
-    enhanced = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
-
-    return enhanced
 
 def _parse_results(results) -> list[Detection]:
     detections = []
@@ -859,15 +828,13 @@ def _parse_results(results) -> list[Detection]:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Inference kasir detection HokBen")
-    p.add_argument("--video",      default=None,  help="Path ke video input")
+    p.add_argument("--video",      required=True,  help="Path ke video input")
     p.add_argument("--weights",    default="runs/detect/kasir_v1/weights/best.pt")
     p.add_argument("--output",     default="runs/inference")
     p.add_argument("--conf",       type=float, default=CONF_THRESHOLD)
     p.add_argument("--show",       action="store_true", help="Tampilkan window live")
     p.add_argument("--no-pose",    action="store_true", help="Matikan pose estimator, pakai mode persentase-bbox lama")
     p.add_argument("--debug-pose", action="store_true", help="Gambar titik landmark pose di video output")
-    p.add_argument("--stream", default=None,
-               help="RTSP URL stream CCTV")
     args = p.parse_args()
 
     run_inference(
@@ -878,5 +845,4 @@ if __name__ == "__main__":
         show       = args.show,
         use_pose   = not args.no_pose,
         debug_pose = args.debug_pose,
-        stream_url = args.stream,
     )
